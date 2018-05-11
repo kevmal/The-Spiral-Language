@@ -11,7 +11,7 @@ let serializer_one_hot =
 /// Useful in RL contexts since union types are not blittable.
 inl rec encode_template f x =
     inl encode = encode_template f
-    inl prod (i,s) x = 
+    inl prod (i,s) x =
         inl i',s' = encode x
         i + i' * s, s * s'
 
@@ -2565,10 +2565,11 @@ inl float ->
         feedforward
             {
             size sublayer
-            weights = inl s -> {
+            weights = inl s -> 
+                {
                 input = initializer (sublayer.size, size) s |> dr s
                 bias = s.CudaTensor.zero {elem_type=float; dim=size} |> dr s
-                }
+                } |> heap
             apply = inl weights input -> matmultb (input, weights.input) weights.bias >>= activation
             }
 
@@ -2678,7 +2679,7 @@ inl float ->
                     }
                 } (adjoint r, primal i) (adjoint i)
 
-        inl o i s ->
+        stack inl o i s ->
             inl r = fwd o i s |> dr s
             r, inl _ -> bck o r i s
 
@@ -2687,10 +2688,11 @@ inl float ->
         feedforward
             {
             size sublayer
-            weights = inl s -> {
+            weights = inl s -> 
+                {
                 input = Initializer.relu (sublayer.size, size) s |> dr s
                 bias = s.CudaTensor.zero {elem_type=float; dim=size} |> dr s
-                }
+                } |> heap
             apply = inl weights input -> 
                 matmultb (input, weights.input) weights.bias 
                 >>= layer_norm_relu o 
@@ -2716,7 +2718,7 @@ inl float ->
                     t = bias0 ()
                     c = bias0 ()
                     }
-                }
+                } |> heap
 
             apply = inl {input bias} i ->
                 open Activation
@@ -2791,7 +2793,7 @@ inl float ->
                 input = initializer (sublayer.size, size) s |> dr s
                 state = initializer (size, size) s |> dr s
                 bias = s.CudaTensor.zero {elem_type=float; dim=size} |> dr s
-                }
+                } |> heap
             apply = inl weights state input -> 
                 match state with
                 | () -> matmultb (input, weights.input) weights.bias >>= activation
@@ -2830,7 +2832,7 @@ inl float ->
                     o = bias0 ()
                     c = bias0 ()
                     }
-                }
+                } |> heap
 
             apply = inl {input state bias} c i ->
                 open Activation
@@ -3279,6 +3281,7 @@ inl float ->
             input .input state_size
             //|> Feedforward.Layer.ln 0f32 256
             //|> Feedforward.Layer.relu 256
+            |> Recurrent.Layer.mi 256
             |> Feedforward.Layer.linear action_size
             |> init s
 
@@ -3299,30 +3302,32 @@ inl float ->
             inl action_size = size action_type * HostTensor.span reward_range
 
             input .input state_size
-            |> Feedforward.Layer.ln 0f32 256
-            |> Feedforward.Layer.ln 0f32 256
+            |> Recurrent.Layer.miln 0.05f32 256
+            |> Recurrent.Layer.miln 0.05f32 256
+            //|> Feedforward.Layer.ln 0f32 256
+            //|> Feedforward.Layer.relu 256
             |> Feedforward.Layer.linear action_size
             |> init s
 
         /// For online learning.
-        /// TODO: So gid's do not get constantly reassigned, it might be good to put a join point here.
         inl action {d with range state_type action_type net state} i s =
-            assert (eq_type state_type i) "The input must be equal to the state type."
-            inl input = 
-                Struct.foldl_map (inl s x -> 
-                    inl i, s' = SerializerOneHot.encode' range x
-                    s + i, s + s'
-                    ) 0 i
-                |> inl l,size -> 
-                    s.CudaKernel.init {dim=1,size} (inl _ x -> Struct.foldl (inl s x' -> if x = x' then one else s) zero l)
-            inl (v,a),{state bck} = 
-                match d with 
-                | {distribution_size} -> greedy_qr one distribution_size
-                | {reward_range} -> greedy_kl reward_range
-                | _ -> greedy_square
-                |> inl runner -> run (runner net) {state input={input}; bck=const()} s
-            inl action = SerializerOneHot.decode range (s.CudaTensor.get (a 0)) action_type
-            action, {bck state}
+            indiv join
+                assert (eq_type state_type i) "The input must be equal to the state type."
+                inl input = 
+                    Struct.foldl_map (inl s x -> 
+                        inl i, s' = SerializerOneHot.encode' range x
+                        s + i, s + s'
+                        ) 0 i
+                    |> inl l,size -> 
+                        s.CudaKernel.init {dim=1,size} (inl _ x -> Struct.foldl (inl s x' -> if x = x' then one else s) zero l)
+                inl (v,a),{state bck} = 
+                    match d with 
+                    | {distribution_size} -> greedy_qr one distribution_size
+                    | {reward_range} -> greedy_kl reward_range
+                    | _ -> greedy_square
+                    |> inl runner -> run (runner net) {state input={input}; bck=const()} s
+                inl action = SerializerOneHot.decode range (s.CudaTensor.get (a 0)) action_type
+                stack (action, {bck state})
         {square_init qr_init kl_init action}
 
     { 
